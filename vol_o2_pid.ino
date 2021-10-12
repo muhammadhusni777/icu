@@ -28,8 +28,8 @@ float o2_set;
 float p_control_o2;
 float i_control_o2;
 float pid_control_o2;
-float kp_o2 = 6;
-float ki_o2 = 0.2;
+float kp_o2 = 4;
+float ki_o2 = 0.09;
 float pid_o2;
 float o2_error;
 float o2_deg;
@@ -44,8 +44,8 @@ int air_servo_pin = 9;
 int tube_servo_pin = 11;
 
 float p_control;
-float kp = 0.23;//best 0.2
-float ki = 0.0015; //0.002
+float kp = 0.19;//best 0.23
+float ki = 0.00025; //0.0005
 float i_control;
 float integral_windup;
 float pid_control;
@@ -213,7 +213,7 @@ myString="";
   Serial.print(volume_set);
   volume = volume+ (o2_lpm_filtered/60) *dt_second;
   Serial.print(" x : ");
-  Serial.print(volume);
+  Serial.print(volume,1);
   //Serial.print(" dt_second : ");
  
   dt = (time_now - time_prev);
@@ -224,6 +224,11 @@ myString="";
 
  //Serial.print(" a servo : ");
   //Serial.print(air_servo_deg);
+  if (o2_set < 80){
+    air_servo_deg = 120;
+  } else {
+    air_servo_deg = 63;
+  }
   air_servo.write(air_servo_deg);
   Serial.print(" Tdeg : ");
   Serial.print(tube_servo_deg);
