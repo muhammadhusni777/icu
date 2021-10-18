@@ -201,7 +201,7 @@ void setup() {
   air_servo.write(110);
   Serial.begin(115200);
   pinMode(zero_pin, INPUT_PULLUP);
-  adc_null = analogRead(A3);
+  adc_null = analogRead(A0);
   o2_set = 20;
   ADS.begin();
   ADS.setGain(0);
@@ -222,6 +222,11 @@ void setup() {
   
 }
 
+
+static char volume_send[15];
+static char o2_send[15];
+static char flow_send[15];
+static char flow_sp_send[15];
 // the loop routine runs over and over again forever:
 void loop() {
   // read the input on analog pin 0:
@@ -256,7 +261,7 @@ if (!client.connected()) {
 
    adc = analogRead(A0)-adc_null;
   if (digitalRead(zero_pin) == 0){
-    adc_null = analogRead(A3);
+    adc_null = analogRead(A0);
   }
   o2_lpm = ((float(adc)/776)*150)/0.93;
   // print out the value you read:
@@ -264,7 +269,7 @@ if (!client.connected()) {
      o2_lpm = 0;
   }
   
-  o2_lpm_filtered = (0.4*o2_lpm) + (0.6*o2_lpm_filtered);
+  o2_lpm_filtered = (0.1*o2_lpm) + (0.9*o2_lpm_filtered);
  // if (o2_lpm_filtered < 2){
  //    o2_lpm_filtered = 0;
  // }
@@ -327,7 +332,7 @@ if (!client.connected()) {
   Serial.print(error);
   
   Serial.print(" x_dot : ");
-  Serial.print(o2_lpm);
+  Serial.print(o2_lpm_filtered);
 
 //  Serial.print(" x_dot_filter : ");
 //  Serial.print(o2_lpm_filtered);
@@ -386,6 +391,12 @@ if (!client.connected()) {
   Serial.print(" ");
   Serial.print(dt_second);
   Serial.println(""); 
+
+
+  client.publish("volume",dtostrf(volume,6,3,volume_send));
+  client.publish("oxygen", dtostrf(o2_filtered, 6, 3, o2_send));
+  client.publish("flow", dtostrf(o2_lpm_filtered, 6, 3, flow_send));
+  client.publish("flow_sp", dtostrf(o2_lpm_desired, 6, 3, flow_sp_send));
   client.loop();
   time_prev = time_now;  
   
