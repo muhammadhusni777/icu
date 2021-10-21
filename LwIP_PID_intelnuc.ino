@@ -1,3 +1,5 @@
+#include <Servo.h>
+
 #include <IWatchdog.h>
 
 #include <ADS1X15.h>
@@ -8,7 +10,10 @@ ADS1115 ADS(0x48);
 #include <LwIP.h>
 #include <STM32Ethernet.h>
 
-
+Servo air_servo;
+Servo tube_servo;
+Servo o2_servo;
+Servo test_servo;
 
 /*
 mosquitto_pub -h 123.45.0.10 -p 1883 -t hoho -m *sudut servo*
@@ -22,10 +27,7 @@ mosquitto_pub -h 123.45.0.10 -p 1883 -t hoho -m *sudut servo*
 
 
 
-#include <Servo.h>
-Servo air_servo;
-Servo tube_servo;
-Servo o2_servo;
+
 //serial parse
 String myString;
 char c;
@@ -44,8 +46,9 @@ float o2_raw;
 float o2_filtered;
 float o2_lpm;
 float o2_lpm_filtered;
+float o2_lpm_filtered_raw;
 float o2_lpm_desired;
-
+float o2_lpm_sum;
 //o2 PID
 float o2_set = 17;
 float p_control_o2;
@@ -56,6 +59,8 @@ float ki_o2 = 0.09;
 float pid_o2;
 float o2_error;
 float o2_deg;
+unsigned long o2_time;
+unsigned long o2_time_prev;
 
 unsigned long time_now;
 unsigned long dt;
@@ -64,7 +69,7 @@ float dt_second;
 unsigned long time_prev;
 float o2_valve_pin = D6;
 int air_servo_pin = D5;
-int tube_servo_pin = D4;
+int tube_servo_pin = 4;
 
 float p_control;
 float kp = 0.003;//best 0.23
@@ -82,6 +87,8 @@ float breath_period;
 float breath_in;
 float breath_out;
 
+float hfot_set_lpm;
+
 char breath_stat;
 
 
@@ -91,6 +98,7 @@ int azimuth =0;
 byte mac[]    = {  0xDE, 0xED, 0xBA, 0xFE, 0xFE, 0xE6 }; //0x00, 0x80, 0xE1, 0x01, 0x01, 0x01
 //byte mac[]    = {  0x00, 0x80, 0xE1, 0x01, 0x01, 0x01 };
 float val;
+String mode = "standby";
 IPAddress ip(123, 45, 0, 106);
 IPAddress server(123, 45, 0, 10);
 
@@ -112,7 +120,10 @@ void callback(char* topic, byte* message, unsigned int length) {
    if (String(topic) == "test_topic") {
     val = messageTemp.toFloat(); 
    }
-
+  
+  if (String(topic) == "mode_set") {
+    mode = messageTemp; 
+   }
    if (String(topic) == "volume_set") {
     volume_set = messageTemp.toFloat(); 
    }
@@ -128,6 +139,11 @@ void callback(char* topic, byte* message, unsigned int length) {
     if (String(topic) == "breath_freq") {
     breath_freq = messageTemp.toFloat(); 
    }
+
+   if (String(topic) == "hfot_set_lpm") {
+    hfot_set_lpm = messageTemp.toFloat(); 
+   }
+   
    if (String(topic) == "o2_set") {
     o2_set = messageTemp.toFloat(); 
    }
@@ -136,6 +152,7 @@ void callback(char* topic, byte* message, unsigned int length) {
    
   if (String(topic) == "hoho") {
     Serial.print("Changing output to ");
+  /*
     if(messageTemp == "1on"){
       Serial.println("on");
       digitalWrite(LED_RED, HIGH);
@@ -160,14 +177,7 @@ void callback(char* topic, byte* message, unsigned int length) {
       Serial.println("off");
       digitalWrite(LED_BLUE, LOW);
     }
-    else if(messageTemp == "4on"){    
-      Serial.println("off");  
-      digitalWrite(4, HIGH);
-    }
-     else if(messageTemp == "4off"){
-      Serial.println("off");
-      digitalWrite(4, LOW);
-    }
+    */
   }
 
  messageTemp ="";
@@ -192,6 +202,8 @@ void reconnect() {
       client.subscribe("expiration");
       client.subscribe("breath_freq");
       client.subscribe("o2_set");
+      client.subscribe("mode_set");
+      client.subscribe("hfot_set_lpm");
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -203,29 +215,32 @@ void reconnect() {
 }
 
 void setup() {
-  // initialize serial communication at 9600 bits per second:
-   Serial.begin(115200);
-  Serial.println("booting....");
-  ADS.begin();
-  ADS.setGain(0);
-  
+ 
   air_servo.attach(air_servo_pin);
   tube_servo.attach(tube_servo_pin);
   o2_servo.attach(o2_valve_pin);
+  //test_servo.attach(2);
   air_servo_deg = 90;
   air_servo.write(110);
+   
+   Serial.begin(115200);
+  Serial.println("booting....");
+  
+
+  
+  
  
   pinMode(zero_pin, INPUT_PULLUP);
   adc_null = analogRead(A0);
-  o2_set = 20;
+  o2_set = 17;
   
   client.setServer(server, 1883);
   client.setCallback(callback);
 
-  pinMode (LED_RED, OUTPUT);
-  pinMode (LED_BLUE, OUTPUT);
-  pinMode (LED_GREEN, OUTPUT);
-  pinMode (4, OUTPUT);
+  //pinMode (LED_RED, OUTPUT);
+  //pinMode (LED_BLUE, OUTPUT);
+  //pinMode (LED_GREEN, OUTPUT);
+  
  
   
   Ethernet.begin(mac, ip);
@@ -233,7 +248,7 @@ void setup() {
   delay(1500);
   //qmc.setMode(Mode_Continuous,ODR_200Hz,RNG_2G,OSR_256);
   IWatchdog.begin(4000000);
-  
+  ADS.begin();
 }
 
 
@@ -244,6 +259,7 @@ static char flow_sp_send[15];
 // the loop routine runs over and over again forever:
 void loop() {
   // read the input on analog pin 0:
+
   time_now = millis();
 // *volume set | inspiration | expiration | air servo | breath freq |o2 set
 //default packet data *0.6|1|1|90|10|30
@@ -252,55 +268,68 @@ if (!client.connected()) {
   }
 
 
-  //volume_set = secondValue.toFloat();
-
-  //inspiration = thirdValue.toFloat();
-
-  //expiration = fourthValue.toFloat();
-
-  //air_servo_deg = fifthValue.toFloat();
-
-  //breath_freq = sixthValue.toFloat();
-  breath_period = 60/breath_freq * 1000;
-//tube_servo_deg = firstValue.toFloat();
-//Serial.print("tube servo deg:");Serial.println(tube_servo_deg);
-
- // o2_set = firstValue.toFloat();
-
-
-  breath_in = breath_period*(inspiration/(inspiration+expiration));
-  breath_out = breath_period*(expiration/(inspiration+expiration));
-  breath_time = (millis() - breath_time_prev);
-
 
    adc = analogRead(A0)-adc_null;
   if (digitalRead(zero_pin) == 0){
     adc_null = analogRead(A0);
   }
+  
+
+ for (int i=1; i<=150; i++){
   o2_lpm = ((float(adc)/776)*150)/0.93;
-  // print out the value you read:
-  if (o2_lpm < 2){
-     o2_lpm = 0;
+  o2_lpm_sum = o2_lpm_sum + o2_lpm;
+ }
+  o2_lpm_filtered_raw = o2_lpm_sum/150;
+  if (o2_lpm_filtered_raw < 2){
+    o2_lpm_filtered_raw = 0;
+  }
+  o2_lpm_sum = 0;
+  o2_lpm_filtered = (0.1*o2_lpm_filtered_raw) + (0.9*o2_lpm_filtered);
+  
+  
+  if(mode == "standby"){
+    pid_control = 20;
+    volume_set = 0;
+    o2_lpm_desired = 0;
+    client.publish("status", "do nothin");
+ 
+  }
+
+  if(mode == "hfot"){
+  o2_lpm_desired = hfot_set_lpm;
+  error = o2_lpm_desired - o2_lpm_filtered;
+  p_control = (kp*error);
+  i_control = i_control+ (ki*error)*dt;
+  if (i_control > 150){
+    i_control = 150;
+  }
+  if (i_control < 0){
+    i_control = 0;
+  }
+  pid_control = p_control + i_control + 0;
+  if (pid_control > 150){
+    pid_control = 150;
   }
   
-  o2_lpm_filtered = (0.1*o2_lpm) + (0.9*o2_lpm_filtered);
- // if (o2_lpm_filtered < 2){
- //    o2_lpm_filtered = 0;
- // }
+  if (pid_control < 0){
+    pid_control = 0;
+  }
+    
+    client.publish("status", "high flow oxygen");
+  }
 
-  
-  
+  if(mode == "p/ac"){
+    client.publish("status", "pressure assist");
+  }
+
+  if (mode == "v/ac"){
+  breath_period = 60/breath_freq * 1000;
+  breath_in = breath_period*(inspiration/(inspiration+expiration));
+  breath_out = breath_period*(expiration/(inspiration+expiration));
+  breath_time = (millis() - breath_time_prev);
+    
   if (breath_time < breath_in){
-    //Serial.print(" in ");
- 
-  
-  //volume base control
-  //error = volume_set - volume;
-
-  //flow base control
-  
   o2_lpm_desired = volume_set / (breath_in/1000) *60 + 2;
- // error = volume_set - o2_lpm;
   error = o2_lpm_desired - o2_lpm_filtered;
   p_control = (kp*error);
   i_control = i_control+ (ki*error)*dt;
@@ -318,7 +347,7 @@ if (!client.connected()) {
   }
   
   //exp filter w = 0.6
-  tube_servo_deg = pid_control;//(1*pid_control) + (1*tube_servo_deg);
+  //(1*pid_control) + (1*tube_servo_deg);
   //tube_servo_deg = 150;
   } else {
   //  Serial.print(" out ");
@@ -326,8 +355,7 @@ if (!client.connected()) {
 //    error = 0;
 //    p_control = 0;
     i_control = 0;
-//    pid_control = 0;
-    
+    pid_control = 0;    
     tube_servo_deg = 0;
   
   }
@@ -335,22 +363,19 @@ if (!client.connected()) {
     volume = 0;
     breath_time_prev = millis();
   }
-  /*
-  Serial.print(breath_time);
-  Serial.print(" ");
-  */
-  //Serial.print(" Ti : ");
-  //Serial.print(breath_in);
+  
+  client.publish("status","volume assist");
+  }
 
+
+
+  Serial.println(mode);
+  Serial.print(" adc : ");
+  Serial.print(adc);
   Serial.print(" e : ");
   Serial.print(error);
-  
   Serial.print(" x_dot : ");
   Serial.print(o2_lpm_filtered);
-
-//  Serial.print(" x_dot_filter : ");
-//  Serial.print(o2_lpm_filtered);
-  
   Serial.print(" x_set : ");
   Serial.print(volume_set);
   volume = volume+ (o2_lpm_filtered/60) *dt_second;
@@ -366,15 +391,22 @@ if (!client.connected()) {
 
  //Serial.print(" a servo : ");
   //Serial.print(air_servo_deg);
+  
   if (o2_set < 80){
     air_servo_deg = 120;
   } else {
     air_servo_deg = 63;
   }
   air_servo.write(air_servo_deg);
+  Serial.print(" Adeg : ");
+  Serial.print(air_servo_deg);
+  tube_servo_deg = pid_control;
+
   Serial.print(" Tdeg : ");
   Serial.print(tube_servo_deg);
+  
   tube_servo.write(tube_servo_deg);
+  
  // Serial.print(breath_stat);
   
   
@@ -383,12 +415,14 @@ if (!client.connected()) {
   Serial.print(o2_set);
   
   //o2_read();
+  o2_time = time_now - o2_time_prev;
+  if (o2_time > 2000){
+   o2_filtered =(0.9 * abs(map(ADS.readADC_Differential_0_1(), 68, 313, 21, 90))) + (0.1*o2_filtered); 
+   o2_time_prev = time_now;
+  }
 
-//  val_01 = 0;  
-  //o2_raw = (0.9*float(val_01)) + (0.1*o2_raw);
-  //ADS.begin();
-  o2_filtered =(0.1 * abs(map(ADS.readADC_Differential_0_1(), 68, 313, 21, 90))) + (0.9*o2_filtered);
-   
+  
+  
   Serial.print(" o2 % : ");
   
   Serial.print(o2_filtered);
@@ -426,9 +460,10 @@ if (!client.connected()) {
   IWatchdog.reload();
 }
 
-
+/*
 void o2_read(){
   int16_t val_01 = ADS.readADC_Differential_0_1();  
   o2_raw = (0.9*val_01) + (0.1*o2_raw);
   o2_filtered = abs(map(o2_raw, 68, 313, 21, 90));
 }
+*/
